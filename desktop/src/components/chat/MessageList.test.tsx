@@ -6,6 +6,7 @@ import { sessionsApi } from '../../api/sessions'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import type { UIMessage } from '../../types/chat'
@@ -105,6 +106,7 @@ describe('MessageList nested tool calls', () => {
     useSettingsStore.setState({ locale: 'en' })
     useUIStore.setState({ pendingSettingsTab: null })
     useTabStore.setState({ activeTabId: ACTIVE_TAB, tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session' as const, status: 'idle' }] })
+    useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
     useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState() } })
     useWorkspaceChatContextStore.setState(useWorkspaceChatContextStore.getInitialState(), true)
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockImplementation(
@@ -2288,6 +2290,107 @@ describe('MessageList nested tool calls', () => {
 
     expect(await screen.findByRole('button', { name: 'Undo current turn changes' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Rewind to here' })).toBeNull()
+  })
+
+  it('branches from completed transcript-backed chat messages using the original transcript id', async () => {
+    const branchSession = vi.fn().mockResolvedValue({
+      sessionId: 'branched-session-1',
+      title: 'Branched session',
+      workDir: '/tmp/branched-session-1',
+    })
+    const connectToSession = vi.fn()
+    useSessionStore.setState({
+      sessions: [{
+        id: ACTIVE_TAB,
+        title: 'Source session',
+        createdAt: '2026-05-19T00:00:00.000Z',
+        modifiedAt: '2026-05-19T00:00:00.000Z',
+        messageCount: 2,
+        projectPath: '/tmp/source-project',
+        projectRoot: '/tmp/source-project',
+        workDir: '/tmp/source-project',
+        workDirExists: true,
+      }],
+      branchSession: branchSession as never,
+    })
+    useChatStore.setState({
+      connectToSession: connectToSession as never,
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'local-user-1',
+              transcriptMessageId: 'transcript-user-1',
+              type: 'user_text',
+              content: '从这里开始',
+              timestamp: 1,
+            },
+            {
+              id: 'local-assistant-1',
+              transcriptMessageId: 'transcript-assistant-1',
+              type: 'assistant_text',
+              content: '这是完成的答复。',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const branchButtons = screen.getAllByRole('button', { name: 'Branch from here' })
+    expect(branchButtons).toHaveLength(2)
+
+    fireEvent.click(branchButtons[1]!)
+
+    await waitFor(() => {
+      expect(branchSession).toHaveBeenCalledWith(ACTIVE_TAB, 'transcript-assistant-1')
+    })
+    expect(connectToSession).toHaveBeenCalledWith('branched-session-1')
+    expect(useTabStore.getState().activeTabId).toBe('branched-session-1')
+    const tabs = useTabStore.getState().tabs
+    expect(tabs[tabs.length - 1]).toMatchObject({
+      sessionId: 'branched-session-1',
+      title: 'Branched session',
+      type: 'session',
+    })
+    const toasts = useUIStore.getState().toasts
+    expect(toasts[toasts.length - 1]).toMatchObject({
+      type: 'success',
+      message: 'Created branched session "Branched session".',
+    })
+  })
+
+  it('hides branch actions while the current session is still running', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          streamingText: 'partial',
+          messages: [
+            {
+              id: 'local-user-1',
+              transcriptMessageId: 'transcript-user-1',
+              type: 'user_text',
+              content: '从这里开始',
+              timestamp: 1,
+            },
+            {
+              id: 'local-assistant-1',
+              transcriptMessageId: 'transcript-assistant-1',
+              type: 'assistant_text',
+              content: '这是完成的答复。',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(screen.queryByRole('button', { name: 'Branch from here' })).toBeNull()
   })
 
   it('keeps historical sessions readable when turn checkpoint payloads are missing', async () => {

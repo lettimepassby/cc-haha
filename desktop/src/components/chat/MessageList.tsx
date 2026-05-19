@@ -1,8 +1,9 @@
 import { useRef, useEffect, useMemo, memo, useState, useCallback, useLayoutEffect, type ReactNode } from 'react'
-import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, LoaderCircle, MessageCircle, Settings, Target, XCircle } from 'lucide-react'
+import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, GitBranch, LoaderCircle, MessageCircle, Settings, Target, XCircle } from 'lucide-react'
 import { ApiError } from '../../api/client'
 import { sessionsApi, type SessionTurnCheckpoint } from '../../api/sessions'
 import { useChatStore } from '../../stores/chatStore'
+import { useSessionStore } from '../../stores/sessionStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useTeamStore } from '../../stores/teamStore'
@@ -46,6 +47,11 @@ type RewindTurnTarget = {
   content: string
   expectedContent: string
   attachments?: Extract<UIMessage, { type: 'user_text' }>['attachments']
+}
+
+type BranchableMessageTarget = {
+  uiMessageId: string
+  transcriptMessageId: string
 }
 
 type TurnChangeCardModel = {
@@ -353,6 +359,37 @@ function SelectableChatMessage({
   )
 }
 
+function MessageBranchAction({
+  align,
+  label,
+  loading,
+  onClick,
+}: {
+  align: ChatMessageRole
+  label: string
+  loading?: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      className={`pointer-events-none relative z-10 -mt-3 h-0 w-full opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 ${
+        align === 'user' ? 'flex justify-end pr-1' : 'flex justify-start pl-1'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={loading}
+        aria-label={label}
+        title={label}
+        className="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--color-border)]/70 bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)] transition-colors hover:border-[var(--color-brand)]/35 hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-wait disabled:opacity-60"
+      >
+        <GitBranch size={13} strokeWidth={2.2} aria-hidden="true" />
+      </button>
+    </div>
+  )
+}
+
 function appendChildToolCall(
   childToolCallsByParent: Map<string, ToolCall[]>,
   parentToolUseId: string,
@@ -448,6 +485,48 @@ function isTurnResponseMessage(message: UIMessage) {
     message.type === 'error' ||
     message.type === 'task_summary'
   )
+}
+
+function getBranchableMessageTargets(messages: UIMessage[]): Map<string, BranchableMessageTarget> {
+  const branchableTargets = new Map<string, BranchableMessageTarget>()
+  let currentTurnCandidates: Array<Extract<UIMessage, { type: 'user_text' | 'assistant_text' }>> = []
+  let hasResponseForCurrentTurn = false
+
+  const markCurrentTurnBranchable = () => {
+    if (!hasResponseForCurrentTurn) return
+    for (const candidate of currentTurnCandidates) {
+      if (!candidate.transcriptMessageId) continue
+      branchableTargets.set(candidate.id, {
+        uiMessageId: candidate.id,
+        transcriptMessageId: candidate.transcriptMessageId,
+      })
+    }
+  }
+
+  for (const message of messages) {
+    if (message.type === 'user_text') {
+      markCurrentTurnBranchable()
+      currentTurnCandidates = []
+      hasResponseForCurrentTurn = false
+      if (!message.pending && message.transcriptMessageId) {
+        currentTurnCandidates = [message]
+      }
+      continue
+    }
+
+    if (currentTurnCandidates.length === 0) continue
+
+    if (isTurnResponseMessage(message)) {
+      hasResponseForCurrentTurn = true
+    }
+
+    if (message.type === 'assistant_text' && message.transcriptMessageId) {
+      currentTurnCandidates.push(message)
+    }
+  }
+
+  markCurrentTurnBranchable()
+  return branchableTargets
 }
 
 export function getCompletedTurnTargets(messages: UIMessage[]): RewindTurnTarget[] {
@@ -628,6 +707,7 @@ type MessageListProps = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48
 const MAX_SCROLL_SNAPSHOTS = 100
+const EMPTY_MESSAGES: UIMessage[] = []
 const CHAT_SCROLL_AREA_CLASS = [
   'chat-scroll-area',
   '[scrollbar-width:auto]',
@@ -685,6 +765,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const sessionState = useChatStore((s) =>
     resolvedSessionId ? s.sessions[resolvedSessionId] : undefined,
   )
+  const branchSession = useSessionStore((s) => s.branchSession)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const reloadHistory = useChatStore((s) => s.reloadHistory)
   const queueComposerPrefill = useChatStore((s) => s.queueComposerPrefill)
@@ -692,7 +773,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     resolvedSessionId ? Boolean(s.getMemberBySessionId(resolvedSessionId)) : false,
   )
   const addToast = useUIStore((s) => s.addToast)
-  const messages = sessionState?.messages ?? []
+  const messages = sessionState?.messages ?? EMPTY_MESSAGES
   const chatState = sessionState?.chatState ?? 'idle'
   const streamingText = sessionState?.streamingText ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
@@ -713,9 +794,17 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
   const [turnActionErrors, setTurnActionErrors] = useState<Record<string, string>>({})
   const [isLoadingTurnChangeCards, setIsLoadingTurnChangeCards] = useState(false)
+  const [branchingMessageId, setBranchingMessageId] = useState<string | null>(null)
   const [rewindingTurnId, setRewindingTurnId] = useState<string | null>(null)
   const [turnUndoConfirmTargetId, setTurnUndoConfirmTargetId] = useState<string | null>(null)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+  const branchActionsDisabled =
+    isMemberSession ||
+    chatState !== 'idle' ||
+    streamingText.trim().length > 0 ||
+    Boolean(activeThinkingId) ||
+    Boolean(sessionState?.activeToolUseId) ||
+    Boolean(sessionState?.activeToolName)
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
     shouldAutoScrollRef.current = true
@@ -841,6 +930,10 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const { toolResultMap, childToolCallsByParent, renderItems } = useMemo(
     () => buildRenderModel(messages),
     [messages],
+  )
+  const branchableMessageTargets = useMemo(
+    () => branchActionsDisabled ? new Map<string, BranchableMessageTarget>() : getBranchableMessageTargets(messages),
+    [branchActionsDisabled, messages],
   )
   const completedTurnTargets = useMemo(() => getCompletedTurnTargets(messages), [messages])
   const latestCompletedTurnId =
@@ -982,6 +1075,29 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     t,
   ])
 
+  const handleBranchMessage = useCallback(async (target: BranchableMessageTarget) => {
+    if (!resolvedSessionId || branchingMessageId) return
+
+    setBranchingMessageId(target.uiMessageId)
+    try {
+      const result = await branchSession(resolvedSessionId, target.transcriptMessageId)
+      const title = result.title.trim() || t('sidebar.newSession')
+      useTabStore.getState().openTab(result.sessionId, title)
+      useChatStore.getState().connectToSession(result.sessionId)
+      addToast({
+        type: 'success',
+        message: t('chat.branchSuccess', { title }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('chat.branchError', { detail: getApiErrorMessage(error) }),
+      })
+    } finally {
+      setBranchingMessageId(null)
+    }
+  }, [addToast, branchSession, branchingMessageId, resolvedSessionId, t])
+
   return (
     <div className="relative min-h-0 flex-1">
       <div
@@ -1023,6 +1139,17 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
                             return result ? { content: result.content, isError: result.isError } : null
                           })()
                         : null
+                    }
+                    branchAction={
+                      (() => {
+                        const branchTarget = branchableMessageTargets.get(item.message.id)
+                        if (!branchTarget) return undefined
+                        return {
+                          label: t('chat.branchFromHere'),
+                          loading: branchingMessageId === branchTarget.uiMessageId,
+                          onBranch: () => { void handleBranchMessage(branchTarget) },
+                        }
+                      })()
                     }
                   />
                 )}
@@ -1112,12 +1239,18 @@ export const MessageBlock = memo(function MessageBlock({
   activeThinkingId,
   agentTaskNotifications,
   toolResult,
+  branchAction,
 }: {
   sessionId?: string | null
   message: UIMessage
   activeThinkingId: string | null
   agentTaskNotifications: Record<string, AgentTaskNotification>
   toolResult?: { content: unknown; isError: boolean } | null
+  branchAction?: {
+    label: string
+    loading?: boolean
+    onBranch: () => void
+  }
 }) {
   const t = useTranslation()
 
@@ -1130,10 +1263,20 @@ export const MessageBlock = memo(function MessageBlock({
           role="user"
           content={message.content}
         >
-          <UserMessage
-            content={message.content}
-            attachments={message.attachments}
-          />
+          <div className="group">
+            <UserMessage
+              content={message.content}
+              attachments={message.attachments}
+            />
+            {branchAction ? (
+              <MessageBranchAction
+                align="user"
+                label={branchAction.label}
+                loading={branchAction.loading}
+                onClick={branchAction.onBranch}
+              />
+            ) : null}
+          </div>
         </SelectableChatMessage>
       )
     case 'assistant_text':
@@ -1144,7 +1287,17 @@ export const MessageBlock = memo(function MessageBlock({
           role="assistant"
           content={message.content}
         >
-          <AssistantMessage content={message.content} />
+          <div className="group">
+            <AssistantMessage content={message.content} />
+            {branchAction ? (
+              <MessageBranchAction
+                align="assistant"
+                label={branchAction.label}
+                loading={branchAction.loading}
+                onClick={branchAction.onBranch}
+              />
+            ) : null}
+          </div>
         </SelectableChatMessage>
       )
     case 'thinking':

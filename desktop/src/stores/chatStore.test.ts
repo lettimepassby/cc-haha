@@ -172,6 +172,8 @@ describe('chatStore history mapping', () => {
     updateTabTitleMock.mockReset()
     updateTabStatusMock.mockReset()
     updateSessionTitleMock.mockReset()
+    vi.mocked(sessionsApi.getMessages).mockReset()
+    vi.mocked(sessionsApi.getMessages).mockResolvedValue({ messages: [] })
     sessionStoreSnapshot.sessions = []
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
@@ -247,6 +249,44 @@ describe('chatStore history mapping', () => {
             action: 'saved',
           },
         ],
+      },
+    ])
+  })
+
+  it('preserves transcript message ids on natural-language history messages', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'transcript-user-1',
+        type: 'user',
+        timestamp: '2026-04-06T00:00:00.000Z',
+        content: '请从这里继续',
+      },
+      {
+        id: 'transcript-assistant-1',
+        type: 'assistant',
+        timestamp: '2026-04-06T00:00:01.000Z',
+        model: 'opus',
+        content: [
+          { type: 'text', text: '这里是答复。' },
+          { type: 'tool_use', name: 'Read', id: 'tool-1', input: { file_path: 'src/App.tsx' } },
+        ],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped).toMatchObject([
+      {
+        id: 'transcript-user-1',
+        type: 'user_text',
+        transcriptMessageId: 'transcript-user-1',
+      },
+      {
+        type: 'assistant_text',
+        transcriptMessageId: 'transcript-assistant-1',
+      },
+      {
+        type: 'tool_use',
       },
     ])
   })
@@ -456,6 +496,143 @@ describe('chatStore history mapping', () => {
       description: 'Review app',
       summary: 'Agent completed',
     })
+  })
+
+  it('hydrates transcript ids for a just-completed live turn', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'transcript-user-1',
+          type: 'user',
+          timestamp: '2026-04-06T00:00:00.000Z',
+          content: 'live prompt',
+        },
+        {
+          id: 'transcript-assistant-1',
+          type: 'assistant',
+          timestamp: '2026-04-06T00:00:01.000Z',
+          content: 'live answer',
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: 'live prompt',
+              timestamp: 1,
+            },
+          ],
+          streamingText: 'live answer',
+          chatState: 'streaming',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+        {
+          type: 'user_text',
+          transcriptMessageId: 'transcript-user-1',
+        },
+        {
+          type: 'assistant_text',
+          transcriptMessageId: 'transcript-assistant-1',
+        },
+      ])
+    })
+  })
+
+  it('retries transcript id hydration after the assistant message is persisted', async () => {
+    vi.useFakeTimers()
+    vi.mocked(sessionsApi.getMessages)
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            id: 'transcript-user-1',
+            type: 'user',
+            timestamp: '2026-04-06T00:00:00.000Z',
+            content: 'live prompt',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            id: 'transcript-user-1',
+            type: 'user',
+            timestamp: '2026-04-06T00:00:00.000Z',
+            content: 'live prompt',
+          },
+          {
+            id: 'transcript-assistant-1',
+            type: 'assistant',
+            timestamp: '2026-04-06T00:00:01.000Z',
+            content: 'live answer',
+          },
+        ],
+      })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: 'live prompt',
+              timestamp: 1,
+            },
+          ],
+          streamingText: 'live answer',
+          chatState: 'streaming',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(sessionsApi.getMessages).toHaveBeenCalledTimes(1)
+    const firstHydrationMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    expect(firstHydrationMessages[0]).toMatchObject({
+      type: 'user_text',
+      transcriptMessageId: 'transcript-user-1',
+    })
+    expect(firstHydrationMessages[1]).toMatchObject({
+      type: 'assistant_text',
+    })
+    expect(firstHydrationMessages[1]).not.toHaveProperty('transcriptMessageId')
+
+    await vi.advanceTimersByTimeAsync(750)
+
+    expect(sessionsApi.getMessages).toHaveBeenCalledTimes(2)
+    const secondHydrationMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    expect(secondHydrationMessages[0]).toMatchObject({
+      type: 'user_text',
+      transcriptMessageId: 'transcript-user-1',
+    })
+    expect(secondHydrationMessages[1]).toMatchObject({
+      type: 'assistant_text',
+      transcriptMessageId: 'transcript-assistant-1',
+    })
+
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
   })
 
   it('merges consecutive assistant text blocks when restoring transcript history', () => {

@@ -233,15 +233,26 @@ function appendAssistantTextMessage(
   content: string,
   timestamp: number,
   model?: string,
+  transcriptMessageId?: string,
 ): UIMessage[] {
   if (!content.trim()) return messages
 
   const last = messages[messages.length - 1]
-  if (last?.type === 'assistant_text') {
+  const canMergeIntoLast =
+    last?.type === 'assistant_text' &&
+    (
+      transcriptMessageId
+        ? last.transcriptMessageId === transcriptMessageId
+        : !last.transcriptMessageId
+    )
+  if (canMergeIntoLast) {
     const merged: UIMessage = {
       ...last,
       content: last.content + content,
       ...(model ?? last.model ? { model: model ?? last.model } : {}),
+      ...(transcriptMessageId ?? last.transcriptMessageId
+        ? { transcriptMessageId: transcriptMessageId ?? last.transcriptMessageId }
+        : {}),
     }
     return [...messages.slice(0, -1), merged]
   }
@@ -253,6 +264,7 @@ function appendAssistantTextMessage(
       type: 'assistant_text',
       content,
       timestamp,
+      ...(transcriptMessageId ? { transcriptMessageId } : {}),
       ...(model ? { model } : {}),
     },
   ]
@@ -328,6 +340,91 @@ function mergeRestoredTerminalGoalEvents(
   return missingTerminalEvents.length > 0
     ? [...messages, ...missingTerminalEvents]
     : messages
+}
+
+function mergeRestoredTranscriptMessageIds(
+  messages: UIMessage[],
+  restoredMessages: UIMessage[],
+): UIMessage[] {
+  const restoredCandidates = restoredMessages.filter((
+    message,
+  ): message is Extract<UIMessage, { type: 'user_text' | 'assistant_text' }> =>
+    (message.type === 'user_text' || message.type === 'assistant_text') &&
+    typeof message.transcriptMessageId === 'string' &&
+    message.transcriptMessageId.length > 0)
+
+  if (restoredCandidates.length === 0) return messages
+
+  let restoredCursor = 0
+  let changed = false
+  const merged = messages.map((message) => {
+    if (
+      (message.type !== 'user_text' && message.type !== 'assistant_text') ||
+      message.transcriptMessageId
+    ) {
+      return message
+    }
+
+    const matchIndex = restoredCandidates.findIndex((candidate, index) =>
+      index >= restoredCursor &&
+      candidate.type === message.type &&
+      candidate.content.trim() === message.content.trim())
+
+    if (matchIndex === -1) return message
+
+    restoredCursor = matchIndex + 1
+    changed = true
+    return {
+      ...message,
+      transcriptMessageId: restoredCandidates[matchIndex]!.transcriptMessageId,
+    }
+  })
+
+  return changed ? merged : messages
+}
+
+function mergeRestoredHistoryIntoLiveMessages(
+  messages: UIMessage[],
+  restoredMessages: UIMessage[],
+): UIMessage[] {
+  return mergeRestoredTerminalGoalEvents(
+    mergeRestoredTranscriptMessageIds(messages, restoredMessages),
+    restoredMessages,
+  )
+}
+
+function needsTranscriptIdHydrationRetry(session: PerSessionState | undefined): boolean {
+  if (!session || session.chatState !== 'idle') return false
+
+  let currentTurnHasHydratedUser = false
+  for (const message of session.messages) {
+    if (message.type === 'user_text') {
+      currentTurnHasHydratedUser = Boolean(message.transcriptMessageId)
+      continue
+    }
+    if (
+      currentTurnHasHydratedUser &&
+      message.type === 'assistant_text' &&
+      !message.transcriptMessageId
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function refreshCompletedTranscriptHistory(
+  get: () => ChatStore,
+  sessionId: string,
+): void {
+  void get().loadHistory(sessionId).then(() => {
+    if (!needsTranscriptIdHydrationRetry(get().sessions[sessionId])) return
+    setTimeout(() => {
+      if (!needsTranscriptIdHydrationRetry(get().sessions[sessionId])) return
+      void get().loadHistory(sessionId)
+    }, 750)
+  })
 }
 
 function normalizeMemoryEventFiles(data: unknown): MemoryEventFile[] {
@@ -705,7 +802,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               s.backgroundAgentTasks ?? {},
               restoredBackgroundTasks,
             ),
-            messages: mergeRestoredTerminalGoalEvents(
+            messages: mergeRestoredHistoryIntoLiveMessages(
               mergeBackgroundTaskMessages(s.messages, restoredBackgroundTasks),
               uiMessages,
             ),
@@ -1072,6 +1169,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             target: { type: 'session', sessionId },
           })
         }
+        refreshCompletedTranscriptHistory(get, sessionId)
         break
       }
 
@@ -1666,13 +1764,24 @@ function pushAssistantHistoryText(
   content: string,
   timestamp: number,
   model?: string,
+  transcriptMessageId?: string,
 ): void {
   if (!content.trim()) return
 
   const last = messages[messages.length - 1]
-  if (last?.type === 'assistant_text') {
+  const canMergeIntoLast =
+    last?.type === 'assistant_text' &&
+    (
+      transcriptMessageId
+        ? last.transcriptMessageId === transcriptMessageId
+        : !last.transcriptMessageId
+    )
+  if (canMergeIntoLast) {
     last.content += content
     if (model && !last.model) last.model = model
+    if (transcriptMessageId && !last.transcriptMessageId) {
+      last.transcriptMessageId = transcriptMessageId
+    }
     return
   }
 
@@ -1681,6 +1790,7 @@ function pushAssistantHistoryText(
     type: 'assistant_text',
     content,
     timestamp,
+    ...(transcriptMessageId ? { transcriptMessageId } : {}),
     ...(model ? { model } : {}),
   })
 }
@@ -1881,6 +1991,7 @@ export function mapHistoryMessagesToUiMessages(
           id: msg.id || nextId(),
           type: 'user_text',
           content: teammateContents.join('\n\n'),
+          ...(msg.id ? { transcriptMessageId: msg.id } : {}),
           timestamp,
         })
         continue
@@ -1890,6 +2001,7 @@ export function mapHistoryMessagesToUiMessages(
         id: msg.id || nextId(),
         type: 'user_text',
         content: parsed.content,
+        ...(msg.id ? { transcriptMessageId: msg.id } : {}),
         ...(parsed.modelContent ? { modelContent: parsed.modelContent } : {}),
         ...(parsed.attachments ? { attachments: parsed.attachments } : {}),
         timestamp,
@@ -1898,13 +2010,22 @@ export function mapHistoryMessagesToUiMessages(
     }
     if (msg.type === 'assistant' && typeof msg.content === 'string') {
       if (!msg.content.trim()) continue
-      uiMessages.push({ id: msg.id || nextId(), type: 'assistant_text', content: msg.content, timestamp, model: msg.model })
+      uiMessages.push({
+        id: msg.id || nextId(),
+        type: 'assistant_text',
+        content: msg.content,
+        ...(msg.id ? { transcriptMessageId: msg.id } : {}),
+        timestamp,
+        model: msg.model,
+      })
       continue
     }
     if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
       for (const block of msg.content as AssistantHistoryBlock[]) {
         if (block.type === 'thinking' && block.thinking) uiMessages.push({ id: nextId(), type: 'thinking', content: block.thinking, timestamp })
-        else if (block.type === 'text' && block.text) pushAssistantHistoryText(uiMessages, block.text, timestamp, msg.model)
+        else if (block.type === 'text' && block.text) {
+          pushAssistantHistoryText(uiMessages, block.text, timestamp, msg.model, msg.id || undefined)
+        }
         else if (block.type === 'tool_use') uiMessages.push({ id: nextId(), type: 'tool_use', toolName: block.name ?? 'unknown', toolUseId: block.id ?? '', input: block.input, timestamp, parentToolUseId: msg.parentToolUseId })
       }
       continue
@@ -1930,6 +2051,7 @@ export function mapHistoryMessagesToUiMessages(
           id: msg.id || nextId(),
           type: 'user_text',
           content: parsed.content,
+          ...(msg.id ? { transcriptMessageId: msg.id } : {}),
           ...(parsed.modelContent ? { modelContent: parsed.modelContent } : {}),
           attachments: allAttachments.length > 0 ? allAttachments : undefined,
           timestamp,
