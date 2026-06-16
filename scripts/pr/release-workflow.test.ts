@@ -380,6 +380,7 @@ describe('release desktop workflow', () => {
           notarize?: boolean
           entitlements?: string
           entitlementsInherit?: string
+          signIgnore?: string[]
         }
       }
     }
@@ -389,6 +390,10 @@ describe('release desktop workflow', () => {
     expect(desktopPackage.build.mac?.notarize).toBe(true)
     expect(desktopPackage.build.mac?.entitlements).toBe('build/entitlements.mac.plist')
     expect(desktopPackage.build.mac?.entitlementsInherit).toBe('build/entitlements.mac.inherit.plist')
+    expect(desktopPackage.build.mac?.signIgnore).toEqual([
+      '/Contents/Frameworks/.+\\.(?:pak|bin|dat|nib)$',
+      '/Contents/Resources/.+\\.(?:asar|pak|bin|dat|icns|png|jpg|jpeg|gif|svg|ttf|woff|woff2)$',
+    ])
   })
 
   test('Windows NSIS installer lets users choose the install directory', () => {
