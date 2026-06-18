@@ -1,0 +1,62 @@
+services:
+  cc-haha:
+    image: cc-haha:latest
+    command: ["bun", "./dist/server.js"]
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: 3456
+      CC_HAHA_SKIP_DOTENV: "1"
+      CLAUDE_CLI_PATH: /app/bin/claude-haha
+      BUN_OPTIONS: --preload=/app/scripts/docker-cli-macro-preload.ts
+      CC_HAHA_USE_ENV_AUTH: "1"
+      NODE_ENV: production
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-127.0.0.1,localhost,::1}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      all_proxy: ${ALL_PROXY:-}
+      no_proxy: ${NO_PROXY:-127.0.0.1,localhost,::1}
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /workspace
+    volumes:
+      - ${CC_HAHA_HOST_WORKDIR:-./workspace}:/workspace
+    restart: unless-stopped
+
+  maxkb-bridge:
+    image: cc-haha:latest
+    command: ["bun", "./dist/maxkb-openai-bridge.js"]
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      BRIDGE_HOST: 0.0.0.0
+      BRIDGE_PORT: 8000
+      CC_HAHA_BASE_URL: http://127.0.0.1:3456
+      CC_HAHA_WS_URL: ws://127.0.0.1:3456
+      CC_HAHA_WORKDIR: /workspace
+      CC_HAHA_PERMISSION_MODE: bypassPermissions
+      BRIDGE_MODEL: cc-haha-code
+      OPENAI_API_KEY: ${MAXKB_OPENAI_API_KEY:-change-me}
+      NODE_ENV: production
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-127.0.0.1,localhost,::1}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      all_proxy: ${ALL_PROXY:-}
+      no_proxy: ${NO_PROXY:-127.0.0.1,localhost,::1}
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /workspace
+    depends_on:
+      - cc-haha
+    volumes:
+      - ${CC_HAHA_HOST_WORKDIR:-./workspace}:/workspace
+    restart: unless-stopped

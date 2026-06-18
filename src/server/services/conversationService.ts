@@ -1173,19 +1173,11 @@ export class ConversationService {
             CC_HAHA_DESKTOP_AWAIT_MCP_TIMEOUT_MS: '5000',
           }
         : {}),
-      // Tell the CLI entrypoint to skip project .env loading. Provider env
-      // should come from Desktop-managed config or inherited launch env, not
-      // be reintroduced from the repo's .env file.
-      CC_HAHA_SKIP_DOTENV: '1',
-      ...(explicitProviderEnv
-        ? { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' }
-        : {}),
-      // "官方" 模式 (cc-haha/settings.json 没 provider env) 下,把 CLI 标记为
-      // managed-OAuth,让它忽略外部 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
-      // 残留、只走用户 /login 的 OAuth token。自定义 provider 模式绝不能设,
-      // 否则 CLI 会忽略 provider 的 AUTH_TOKEN、错误地走 OAuth 打到第三方
-      // endpoint。详见 src/utils/auth.ts isManagedOAuthContext()。
-      ...(explicitProviderEnv ?? {}),
+      // Docker / env-only auth mode: when explicitly enabled, keep the CLI in
+      // normal env-auth mode so ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are
+      // honored instead of forcing managed OAuth behavior.
+      CC_HAHA_USE_ENV_AUTH: process.env.CC_HAHA_USE_ENV_AUTH,
+
       ...networkEnv,
       ...(this.shouldMarkManagedOAuth(options?.providerId)
         ? await this.buildOfficialOAuthEnv()
@@ -1264,6 +1256,9 @@ export class ConversationService {
   }
 
   private shouldStripInheritedProviderEnv(providerId?: string | null): boolean {
+    if (process.env.CC_HAHA_USE_ENV_AUTH === '1') {
+      return false
+    }
     if (providerId !== undefined) {
       return true
     }
@@ -1316,6 +1311,9 @@ export class ConversationService {
    * provider 管理,也希望官方 OAuth 能正常工作。
    */
   private shouldMarkManagedOAuth(providerId?: string | null): boolean {
+    if (process.env.CC_HAHA_USE_ENV_AUTH === '1') {
+      return false
+    }
     if (providerId === null) {
       return true
     }

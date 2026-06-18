@@ -1,0 +1,37 @@
+services:
+  cc-haha:
+    build:
+      context: .
+    image: cc-haha:latest
+    command: ["bun", "./dist/server.js"]
+    network_mode: host
+    environment:
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: 3456
+      CC_HAHA_SKIP_DOTENV: "1"
+      CLAUDE_CLI_PATH: /app/bin/claude-haha
+      BUN_OPTIONS: --preload=/app/scripts/docker-cli-macro-preload.ts
+      NODE_ENV: production
+    volumes:
+      - ${CC_HAHA_HOST_WORKDIR:-./workspace}:/workspace
+    restart: unless-stopped
+
+  maxkb-bridge:
+    image: cc-haha:latest
+    command: ["bun", "./dist/maxkb-openai-bridge.js"]
+    network_mode: host
+    environment:
+      BRIDGE_HOST: 0.0.0.0
+      BRIDGE_PORT: 8000
+      CC_HAHA_BASE_URL: http://127.0.0.1:3456
+      CC_HAHA_WS_URL: ws://127.0.0.1:3456
+      CC_HAHA_WORKDIR: /workspace
+      CC_HAHA_PERMISSION_MODE: default
+      BRIDGE_MODEL: cc-haha-code
+      OPENAI_API_KEY: ${MAXKB_OPENAI_API_KEY:-change-me}
+      NODE_ENV: production
+    depends_on:
+      - cc-haha
+    volumes:
+      - ${CC_HAHA_HOST_WORKDIR:-./workspace}:/workspace
+    restart: unless-stopped

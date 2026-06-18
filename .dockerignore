@@ -1,0 +1,10 @@
+.git
+node_modules
+adapters/node_modules
+dist
+dist-docker
+.tmp
+.cache
+coverage
+*.log
+.env
